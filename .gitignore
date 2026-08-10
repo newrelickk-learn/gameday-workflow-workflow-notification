@@ -1,0 +1,24 @@
+# Rust
+target/
+# Cargo.lock はバイナリプロジェクトではコミットすべき（コメントアウト）
+# Cargo.lock
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+

@@ -1,0 +1,21 @@
+services:
+  workflow-notification-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: workflow-notification-service:prod
+    platform: linux/amd64
+    ports:
+      - "8003:8003"
+    environment:
+      - PORT=8003
+      - DATABASE_URL=${DATABASE_URL}
+      - RUST_LOG=${RUST_LOG:-info}
+    networks:
+      - gameday-workflow
+
+networks:
+  gameday-workflow:
+    external: true
+    name: gameday-workflow
+

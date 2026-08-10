@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gameday-workflow-workflow-notification
+  namespace: gameday-workflow
+  labels:
+    app: gameday-workflow-workflow-notification
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gameday-workflow-workflow-notification
+  template:
+    metadata:
+      labels:
+        app: gameday-workflow-workflow-notification
+    spec:
+      containers:
+        - name: gameday-workflow-workflow-notification
+          # CIのdeploy.ymlが `kubectl set image` で実際のECRイメージに差し替える。初回applyのみこのタグが使われる。
+          image: gameday-workflow-workflow-notification:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8003
+              name: http
+          env:
+            - name: PORT
+              value: "8003"
+            - name: RUST_LOG
+              value: "info"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gameday-workflow-workflow-notification-secrets
+                  key: database-url
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8003
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8003
+            initialDelaySeconds: 5
+            periodSeconds: 5

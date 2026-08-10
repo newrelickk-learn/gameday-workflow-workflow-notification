@@ -1,0 +1,828 @@
+openapi: 3.0.3
+info:
+  title: Workflow & Notification Service API
+  description: |
+    GameDay Workflow システムのワークフロー・通知管理サービスAPI
+    承認フローの管理と通知機能を提供します。
+
+    ## APIの使い方
+
+    ### 基本的なワークフロー承認フロー
+
+    1. **ワークフロー開始** (`POST /workflows/start`)
+       - 申請が提出されたら、ワークフローインスタンスを開始します
+       - 申請タイプ（BusinessTrip, Expense, Vacation, Promotion）を指定
+       - ワークフローインスタンスが作成され、currentStep=1で開始されます
+
+    2. **承認バリデーション** (`POST /workflows/validate-approval`)
+       - 承認を実行する前に、承認が可能かどうかを検証します
+       - 現在のステップ、承認者の権限、次のステップを確認します
+       - このエンドポイントは承認を実行せず、検証のみを行います
+
+    3. **承認実行** (`POST /workflows/approve`)
+       - 承認を実行し、ワークフローを次のステップに進めます
+       - 承認が完了すると、currentStepが更新されます
+       - 最終ステップの承認が完了すると、statusが"completed"になります
+       - 次のステップの承認者に通知が自動的に送信されます
+
+    ### 申請タイプ別の承認フロー
+
+    #### 1. 出張申請 (BusinessTrip) - 3ステップ
+    - ステップ1: エンジニア申請（申請者自身）
+    - ステップ2: 上長承認（approverId: 21051など）
+    - ステップ3: 本部長最終承認（approverId: 1051など）
+
+    #### 2. 経費申請 (Expense) - 2ステップ（1段階承認）
+    - ステップ1: エンジニア申請（申請者自身）
+    - ステップ2: 上長承認（approverId: 21051など）
+
+    #### 2b. 経費精算 (ExpenseSettlement) - 3ステップ（2段階承認）
+    海外出張後の経費精算など、高額な経費（航空券・宿泊費など）が対象。
+    `applicationType: "Expense"` のまま `amount` に金額（閾値: 100,000円以上）を
+    指定して `/workflows/start` を呼ぶと、自動的にこのワークフロー定義に切り上げられる
+    （`applicationType: "ExpenseSettlement"` を直接指定することもできる）。
+    - ステップ1: エンジニア申請（申請者自身）
+    - ステップ2: 上長承認（approverId: 21051など）
+    - ステップ3: 経理承認（approverId: 16051など）
+
+    #### 3. 休暇申請 (Vacation) - 2ステップ
+    - ステップ1: エンジニア申請（申請者自身）
+    - ステップ2: 上長承認（approverId: 21051など）
+
+    #### 4. プロモーション申請 (Promotion) - 2ステップ
+    - ステップ1: 上長申請（approverId: 21051など）
+    - ステップ2: 本部長承認（approverId: 1051など）
+
+    ### 承認者IDのマッピング（CompanyId=1の場合）
+
+    - エンジニア: 20001（申請者として使用）
+    - 上長: 21051
+    - 本部長: 1051
+    - 経理: 16051
+
+    ### 使用例
+
+    #### 例1: 出張申請の承認フロー
+
+    ```bash
+    # 1. ワークフロー開始
+    curl -X POST http://localhost:8003/api/v1/workflows/start \
+      -H "Content-Type: application/json" \
+      -d '{
+        "applicationId": "bt-001",
+        "applicationType": "BusinessTrip",
+        "companyId": 1
+      }'
+
+    # 2. ステップ1の承認バリデーション
+    curl -X POST http://localhost:8003/api/v1/workflows/validate-approval \
+      -H "Content-Type: application/json" \
+      -d '{
+        "approvalId": "bt-001-1",
+        "applicationId": "bt-001",
+        "approverId": "20001",
+        "status": "approved"
+      }'
+
+    # 3. ステップ1の承認実行
+    curl -X POST http://localhost:8003/api/v1/workflows/approve \
+      -H "Content-Type: application/json" \
+      -d '{
+        "approvalId": "bt-001-1",
+        "applicationId": "bt-001",
+        "approverId": "20001",
+        "status": "approved"
+      }'
+    # レスポンス: currentStep=2, status="in_progress"
+
+    # 4. ステップ2の承認実行（上長）
+    curl -X POST http://localhost:8003/api/v1/workflows/approve \
+      -H "Content-Type: application/json" \
+      -d '{
+        "approvalId": "bt-001-2",
+        "applicationId": "bt-001",
+        "approverId": "21051",
+        "status": "approved"
+      }'
+    # レスポンス: currentStep=3, status="in_progress"
+
+    # 5. ステップ3の承認実行（本部長）
+    curl -X POST http://localhost:8003/api/v1/workflows/approve \
+      -H "Content-Type: application/json" \
+      -d '{
+        "approvalId": "bt-001-3",
+        "applicationId": "bt-001",
+        "approverId": "1051",
+        "status": "approved"
+      }'
+    # レスポンス: currentStep=3, status="completed"
+    ```
+
+    #### 例2: 通知履歴の取得
+
+    ```bash
+    curl -X GET "http://localhost:8003/api/v1/notifications/history?recipient_id=21051"
+    ```
+
+    ### エラーハンドリング
+
+    - **400 Bad Request**: リクエストパラメータが不正な場合
+    - **401 Unauthorized**: 認証が必要な場合
+    - **404 Not Found**: ワークフローインスタンスが見つからない場合
+    - **500 Internal Server Error**: サーバーエラーが発生した場合
+
+    ### 注意事項
+
+    - 承認を実行する前に、必ず `validate-approval` で検証することを推奨します
+    - 承認ステータスは "approved" または "rejected" のみ有効です
+    - ワークフローが完了（status="completed"）した後は、承認を実行できません
+    - 各ステップの承認が完了すると、次のステップの承認者に自動的に通知が送信されます
+  version: 1.0.0
+  contact:
+    name: GameDay Workflow Team
+servers:
+  - url: http://localhost:8003/api/v1
+    description: ローカル開発環境
+  - url: https://api.gameday-workflow.example.com/workflow-service/api/v1
+    description: 本番環境
+
+tags:
+  - name: Notifications
+    description: 通知関連のエンドポイント
+  - name: Workflows
+    description: ワークフロー関連のエンドポイント
+  - name: Health
+    description: ヘルスチェック関連のエンドポイント
+
+paths:
+  /workflows/start:
+    post:
+      tags:
+        - Workflows
+      summary: ワークフロー開始
+      description: |
+        申請に基づいてワークフローインスタンスを開始します。
+        
+        **使用タイミング**: 申請が提出されたときに呼び出します。
+        
+        **処理内容**:
+        - 指定された申請タイプに基づいてワークフローインスタンスを作成
+        - currentStep=1で開始
+        - ステップ2以降の承認者に通知を自動送信
+        
+        **申請タイプ**: BusinessTrip, Expense, Vacation, Promotion
+      operationId: startWorkflow
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartWorkflowRequest'
+            example:
+              applicationId: "1"
+              applicationType: "BusinessTrip"
+      responses:
+        '200':
+          description: ワークフロー開始成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartWorkflowResponse'
+              example:
+                workflowInstanceId: "550e8400-e29b-41d4-a716-446655440000"
+                applicationId: "1"
+                currentStep: 1
+                status: "pending"
+        '401':
+          description: 認証が必要です
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: ワークフロー定義が見つかりません
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "NOT_FOUND"
+                message: "ワークフロー定義が見つかりません: BusinessTrip"
+        '500':
+          description: サーバーエラー
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /workflows/validate-approval:
+    post:
+      tags:
+        - Workflows
+      summary: 承認バリデーション
+      description: |
+        申請承認サービスから承認前に呼び出されるエンドポイント。
+        承認可能かどうかの検証（現在のステップ、承認者の権限など）と
+        次のステップの判定（最終承認か、次の承認者へか）を即座に返却します。
+        
+        **使用タイミング**: `/workflows/approve` を呼び出す前に、承認が可能かどうかを検証するために使用します。
+        
+        **注意**: このエンドポイントは承認を実行せず、検証のみを行います。
+        実際に承認を実行するには `/workflows/approve` を呼び出してください。
+      operationId: validateApproval
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ValidateApprovalRequest'
+            example:
+              approvalId: "1-1"
+              applicationId: "1"
+              approverId: "21051"
+              status: "approved"
+      responses:
+        '200':
+          description: バリデーション成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidateApprovalResponse'
+              example:
+                valid: true
+                currentStep: 1
+                isFinalStep: false
+                nextStep: 2
+                message: "承認可能です"
+        '400':
+          description: リクエストが不正です
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "VALIDATION_ERROR"
+                message: "承認ステータスが不正です"
+        '401':
+          description: 認証が必要です
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: ワークフローまたは承認が見つかりません
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "NOT_FOUND"
+                message: "指定された承認IDのワークフローが見つかりません"
+        '500':
+          description: サーバーエラー
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /workflows/approve:
+    post:
+      tags:
+        - Workflows
+      summary: ワークフロー承認実行
+      description: |
+        承認を実行し、ワークフローを次のステップに進めます。
+        
+        **使用タイミング**: `/workflows/validate-approval` で検証した後、実際に承認を実行するときに呼び出します。
+        
+        **処理内容**:
+        - 承認を実行し、ワークフローのcurrentStepを更新
+        - 承認が完了すると、次のステップの承認者に通知を自動送信
+        - 最終ステップの承認が完了すると、ワークフローのstatusが"completed"になります
+        - 承認が拒否（status="rejected"）された場合、ワークフローのstatusが"rejected"になります
+        
+        **レスポンス**:
+        - currentStep: 更新後の現在のステップ番号
+        - status: "in_progress"（進行中）、"completed"（完了）、"rejected"（拒否）
+        - message: 承認結果のメッセージ
+        
+        **注意**: 承認を実行する前に、必ず `/workflows/validate-approval` で検証することを推奨します。
+      operationId: approveWorkflow
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveWorkflowRequest'
+            example:
+              approvalId: "1-1"
+              applicationId: "1"
+              approverId: "21051"
+              status: "approved"
+      responses:
+        '200':
+          description: 承認実行成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApproveWorkflowResponse'
+              example:
+                applicationId: "1"
+                currentStep: 2
+                status: "in_progress"
+                message: "ステップ1の承認が完了しました。次のステップに進みます。"
+        '400':
+          description: リクエストが不正です
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "VALIDATION_ERROR"
+                message: "承認ステータスが不正です"
+        '401':
+          description: 認証が必要です
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: ワークフローまたは承認が見つかりません
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "NOT_FOUND"
+                message: "指定された承認IDのワークフローが見つかりません"
+        '500':
+          description: サーバーエラー
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /notifications/send:
+    post:
+      tags:
+        - Notifications
+      summary: 通知送信
+      description: |
+        指定された受信者に通知を送信します。
+        
+        **使用タイミング**: 手動で通知を送信する必要がある場合に使用します。
+        通常、ワークフロー進行時に通知は自動的に送信されるため、このエンドポイントは主にテストや手動通知に使用されます。
+        
+        **通知タイプ**: ApprovalRequest, ApprovalCompleted, ApprovalRejected, WorkflowCompleted
+      operationId: sendNotification
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendNotificationRequest'
+            example:
+              notificationType: "ApprovalRequest"
+              recipientId: "21051"
+              subject: "承認依頼があります"
+              body: "申請ID: 1 の承認をお願いします"
+      responses:
+        '200':
+          description: 通知送信成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendNotificationResponse'
+              example:
+                success: true
+                message: "通知を送信しました"
+        '400':
+          description: リクエストが不正です
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "INVALID_TYPE"
+                message: "不正な通知タイプです: InvalidType"
+        '401':
+          description: 認証が必要です
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: サーバーエラー
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /notifications/history:
+    get:
+      tags:
+        - Notifications
+      summary: 通知履歴取得
+      description: |
+        指定された受信者の通知履歴を取得します。
+        
+        **使用タイミング**: 特定のユーザー（承認者）に送信された通知の履歴を確認する場合に使用します。
+        
+        **パラメータ**: recipient_id（必須）- 受信者IDを指定
+      operationId: getNotificationHistory
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: recipient_id
+          in: query
+          required: true
+          description: 受信者ID
+          schema:
+            type: string
+            example: "21051"
+      responses:
+        '200':
+          description: 通知履歴取得成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Notification'
+              example:
+                - id: "550e8400-e29b-41d4-a716-446655440000"
+                  notificationType: "ApprovalRequest"
+                  channel: "Email"
+                  recipientId: "21051"
+                  recipientEmail: "approver@example.com"
+                  subject: "承認依頼があります"
+                  body: "申請ID: 1 の承認をお願いします"
+                  sentAt: "2024-04-01T12:00:00Z"
+                  createdAt: "2024-04-01T12:00:00Z"
+        '400':
+          description: リクエストが不正です
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "MISSING_PARAMETER"
+                message: "recipient_idパラメータが必要です"
+        '401':
+          description: 認証が必要です
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: サーバーエラー
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /health:
+    get:
+      tags:
+        - Health
+      summary: ヘルスチェック
+      description: サービスの稼働状態を確認します
+      operationId: healthCheck
+      responses:
+        '200':
+          description: サービスは正常に稼働しています
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: "ok"
+                service: "workflow-notification-service"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWTトークンによる認証
+
+  schemas:
+    StartWorkflowRequest:
+      type: object
+      required:
+        - applicationId
+        - applicationType
+      properties:
+        applicationId:
+          type: string
+          description: 申請ID
+          example: "1"
+        applicationType:
+          type: string
+          description: 申請タイプ（ワークフロー定義名）
+          example: "BusinessTrip"
+        companyId:
+          type: integer
+          nullable: true
+          description: 会社ID（未指定の場合は1）
+          example: 1
+        amount:
+          type: number
+          format: double
+          nullable: true
+          description: |
+            経費申請（applicationType: "Expense"）の金額。
+            100,000円以上の場合、経費精算（ExpenseSettlement、
+            上長承認 → 経理承認の2段階承認）のワークフロー定義に自動的に切り上げられる。
+            経費申請以外の申請タイプでは使用されない。
+          example: 150000
+
+    StartWorkflowResponse:
+      type: object
+      required:
+        - workflowInstanceId
+        - applicationId
+        - currentStep
+        - status
+      properties:
+        workflowInstanceId:
+          type: string
+          description: ワークフローインスタンスID
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        applicationId:
+          type: string
+          description: 申請ID
+          example: "1"
+        currentStep:
+          type: integer
+          description: 現在の承認ステップ
+          example: 1
+        status:
+          type: string
+          description: ワークフローインスタンスのステータス
+          example: "pending"
+
+    ApprovalStatus:
+      type: string
+      enum:
+        - pending
+        - approved
+        - rejected
+      description: 承認ステータス
+      example: pending
+
+    ValidateApprovalRequest:
+      type: object
+      required:
+        - approvalId
+        - applicationId
+        - approverId
+        - status
+      properties:
+        approvalId:
+          type: string
+          description: 承認ID
+          example: "1-1"
+        applicationId:
+          type: string
+          description: 申請ID
+          example: "1"
+        approverId:
+          type: string
+          description: 承認者ID
+          example: "21051"
+        status:
+          $ref: '#/components/schemas/ApprovalStatus'
+
+    ValidateApprovalResponse:
+      type: object
+      required:
+        - valid
+        - currentStep
+        - isFinalStep
+      properties:
+        valid:
+          type: boolean
+          description: 承認可能かどうか
+          example: true
+        currentStep:
+          type: integer
+          description: 現在の承認ステップ
+          example: 1
+        isFinalStep:
+          type: boolean
+          description: 最終ステップかどうか
+          example: false
+        nextStep:
+          type: integer
+          nullable: true
+          description: 次の承認ステップ（最終ステップの場合はnull）
+          example: 2
+        message:
+          type: string
+          nullable: true
+          description: バリデーションメッセージ
+          example: "承認可能です"
+
+    ApproveWorkflowRequest:
+      type: object
+      required:
+        - approvalId
+        - applicationId
+        - approverId
+        - status
+      properties:
+        approvalId:
+          type: string
+          description: 承認ID
+          example: "1-1"
+        applicationId:
+          type: string
+          description: 申請ID
+          example: "1"
+        approverId:
+          type: string
+          description: 承認者ID
+          example: "21051"
+        status:
+          type: string
+          enum:
+            - approved
+            - rejected
+          description: 承認ステータス
+          example: "approved"
+
+    ApproveWorkflowResponse:
+      type: object
+      required:
+        - applicationId
+        - currentStep
+        - status
+      properties:
+        applicationId:
+          type: string
+          description: 申請ID
+          example: "1"
+        currentStep:
+          type: integer
+          description: 更新後の現在の承認ステップ
+          example: 2
+        status:
+          type: string
+          enum:
+            - pending
+            - in_progress
+            - completed
+            - rejected
+          description: ワークフローインスタンスのステータス
+          example: "in_progress"
+        message:
+          type: string
+          nullable: true
+          description: レスポンスメッセージ
+          example: "ステップ1の承認が完了しました。次のステップに進みます。"
+
+    SendNotificationRequest:
+      type: object
+      required:
+        - notificationType
+        - recipientId
+        - subject
+        - body
+      properties:
+        notificationType:
+          type: string
+          enum:
+            - ApprovalRequest
+            - ApprovalCompleted
+            - ApprovalRejected
+            - WorkflowCompleted
+          description: 通知タイプ
+          example: "ApprovalRequest"
+        recipientId:
+          type: string
+          description: 受信者ID
+          example: "21051"
+        subject:
+          type: string
+          description: 通知件名
+          example: "承認依頼があります"
+        body:
+          type: string
+          description: 通知本文
+          example: "申請ID: 1 の承認をお願いします"
+
+    SendNotificationResponse:
+      type: object
+      required:
+        - success
+        - message
+      properties:
+        success:
+          type: boolean
+          description: 送信成功フラグ
+          example: true
+        message:
+          type: string
+          description: レスポンスメッセージ
+          example: "通知を送信しました"
+
+    Notification:
+      type: object
+      required:
+        - id
+        - notificationType
+        - channel
+        - recipientId
+        - subject
+        - body
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 通知ID
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        notificationType:
+          type: string
+          enum:
+            - ApprovalRequest
+            - ApprovalCompleted
+            - ApprovalRejected
+            - WorkflowCompleted
+          description: 通知タイプ
+          example: "ApprovalRequest"
+        channel:
+          type: string
+          enum:
+            - Email
+            - Slack
+          description: 通知チャネル
+          example: "Email"
+        recipientId:
+          type: string
+          description: 受信者ID
+          example: "21051"
+        recipientEmail:
+          type: string
+          nullable: true
+          description: 受信者メールアドレス
+          example: "approver@example.com"
+        subject:
+          type: string
+          description: 通知件名
+          example: "承認依頼があります"
+        body:
+          type: string
+          description: 通知本文
+          example: "申請ID: 1 の承認をお願いします"
+        sentAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 送信日時
+          example: "2024-04-01T12:00:00Z"
+        createdAt:
+          type: string
+          format: date-time
+          description: 作成日時
+          example: "2024-04-01T12:00:00Z"
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - service
+      properties:
+        status:
+          type: string
+          description: サービスステータス
+          example: "ok"
+        service:
+          type: string
+          description: サービス名
+          example: "workflow-notification-service"
+
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: エラーコード
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          description: エラーメッセージ
+          example: "承認ステータスが不正です"
+

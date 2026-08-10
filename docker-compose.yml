@@ -1,0 +1,29 @@
+services:
+  workflow-notification-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: workflow-notification-service:${IMAGE_TAG:-local}
+    platform: ${BUILD_PLATFORM:-linux/arm64}
+    ports:
+      - "8003:8003"
+    environment:
+      - PORT=8003
+      - DATABASE_URL=${DATABASE_URL:-postgresql://gameday_user:gameday_password@postgres:5432/gameday_workflow_notification}
+      - RUST_LOG=${RUST_LOG:-info}
+    depends_on:
+      - wait-for-db
+    networks:
+      - gameday-workflow-network
+
+  wait-for-db:
+    image: busybox:latest
+    command: sh -c 'until nc -z host.docker.internal 5432; do echo "Waiting for PostgreSQL..."; sleep 2; done; echo "PostgreSQL is ready!"'
+    networks:
+      - gameday-workflow-network
+
+networks:
+  gameday-workflow-network:
+    external: true
+    name: gameday-workflow-network
+
