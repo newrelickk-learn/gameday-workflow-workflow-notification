@@ -54,16 +54,39 @@ where
             .unwrap_or_else(|| path.clone());
         let connection_info = req.connection_info().clone();
         let server_address = connection_info.host().to_string();
+        let client_address = connection_info.realip_remote_addr().unwrap_or("").to_string();
+        let network_protocol_version = match req.version() {
+            actix_web::http::Version::HTTP_10 => "1.0",
+            actix_web::http::Version::HTTP_11 => "1.1",
+            actix_web::http::Version::HTTP_2 => "2",
+            actix_web::http::Version::HTTP_3 => "3",
+            _ => "",
+        };
+        let user_agent = req
+            .headers()
+            .get(actix_web::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        // スパン名はHTTP Semantic Conventions推奨の "{method} {route}" 形式にする
+        // （otel.nameは動的なスパン名をtracing-opentelemetryに伝える予約フィールド名）
+        let span_name = format!("{} {}", method, route);
 
         let span = info_span!(
             "http_request",
+            otel.name = %span_name,
+            otel.kind = "server",
+            otel.status_code = tracing::field::Empty,
             http.request.method = %method,
             http.route = %route,
+            http.response.status_code = tracing::field::Empty,
+            network.protocol.version = %network_protocol_version,
             server.address = %server_address,
+            client.address = %client_address,
+            user_agent.original = %user_agent,
             url.path = %path,
             url.scheme = "http",
-            otel.kind = "server",
-            http.response.status_code = tracing::field::Empty,
         );
 
         let fut = self.service.call(req);
@@ -71,10 +94,17 @@ where
         Box::pin(
             async move {
                 let res = fut.await?;
-                let status_code = res.status().as_u16();
+                let status_code = res.status().as_u16() as i64;
                 let duration_ms = start.elapsed().as_millis() as f64;
 
-                tracing::Span::current().record("http.response.status_code", status_code);
+                let current_span = tracing::Span::current();
+                // i64として渡すことで、New Relic側で文字列ではなく数値として扱われる
+                // （u16はtracingのValue実装が無くDebugにフォールバックし文字列化されるため）
+                current_span.record("http.response.status_code", status_code);
+                // HTTP Semantic Conventions: サーバースパンは5xxの場合にErrorとする
+                if status_code >= 500 {
+                    current_span.record("otel.status_code", "ERROR");
+                }
 
                 info!(
                     http.response.status_code = status_code,
