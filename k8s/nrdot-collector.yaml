@@ -16,7 +16,9 @@ data:
       batch: {}
     exporters:
       otlp/newrelic:
-        endpoint: "https://otlp.nr-data.net:4317"
+        # このNew RelicアカウントはJPリージョン（api-key確認時にone.jp.newrelic.comへリダイレクトされる）
+        # のため、USリージョンのデフォルトエンドポイント(otlp.nr-data.net)ではPermissionDeniedになる
+        endpoint: "https://otlp.jp.nr-data.net:4317"
         tls:
           insecure: false
         headers:
