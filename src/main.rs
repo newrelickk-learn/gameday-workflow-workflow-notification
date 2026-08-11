@@ -2,14 +2,16 @@ mod api;
 mod domain;
 mod infrastructure;
 mod services;
+mod telemetry_middleware;
 
 use actix_web::{web, App, HttpServer};
 use dotenv::dotenv;
 use sea_orm::{Database, DatabaseConnection};
-use tracing_subscriber;
+use std::sync::Arc;
 
 use api::routes;
 use infrastructure::db::WorkflowRepository;
+use rust_tracing_otel::TelemetryManager;
 use services::workflow_service::WorkflowServiceImpl;
 
 #[actix_web::main]
@@ -17,10 +19,16 @@ async fn main() -> std::io::Result<()> {
     // 環境変数の読み込み
     dotenv().ok();
 
-    // ロギングの初期化
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    // テレメトリ（tracing + OpenTelemetry）の初期化
+    // この呼び出しがグローバルなtracing subscriberを設定するため、
+    // 他にtracing_subscriber::fmt().init()等を呼んではいけない（二重初期化になる）
+    let telemetry = Arc::new(
+        TelemetryManager::from_env().expect("Failed to create telemetry manager"),
+    );
+    telemetry
+        .init()
+        .await
+        .expect("Failed to initialize telemetry");
 
     // データベース接続の作成
     let database_url = std::env::var("DATABASE_URL")
@@ -55,15 +63,21 @@ async fn main() -> std::io::Result<()> {
     let workflow_service_data = web::Data::new(workflow_service);
     let notification_service_data = web::Data::new(notification_service_for_app);
 
-    HttpServer::new(move || {
+    let result = HttpServer::new(move || {
         App::new()
             .app_data(workflow_service_data.clone())
             .app_data(notification_service_data.clone())
-            .wrap(tracing_actix_web::TracingLogger::default())
+            .wrap(telemetry_middleware::TelemetryMiddleware)
             .configure(routes::configure)
     })
     .bind(("0.0.0.0", port))?
     .run()
-    .await
+    .await;
+
+    if let Err(e) = telemetry.shutdown().await {
+        tracing::error!("Failed to shutdown telemetry: {}", e);
+    }
+
+    result
 }
 

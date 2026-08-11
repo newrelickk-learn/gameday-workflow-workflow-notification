@@ -18,9 +18,10 @@ anyhow = "1.0"
 thiserror = "1.0"
 async-trait = "0.1"
 tracing = "0.1"
-tracing-actix-web = "0.7"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenv = "0.15"
+rust-tracing-otel = { git = "https://github.com/Azumaxoid/rust-tracing-otel" }
+futures-util = "0.3"
 
 [dev-dependencies]
 mockall = "0.12"
