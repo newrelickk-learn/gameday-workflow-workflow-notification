@@ -1,6 +1,9 @@
 use crate::domain::workflow::{WorkflowInstance, WorkflowStatus, WorkflowStep};
 use anyhow::Result;
+use rust_tracing_otel::{KeyValue, TelemetryManager};
 use sea_orm::{DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, Set, ActiveModelTrait, PaginatorTrait, QueryOrder};
+use std::sync::Arc;
+use std::time::Instant;
 use uuid::Uuid;
 
 use super::notification;
@@ -10,25 +13,63 @@ use super::workflow_step;
 
 pub struct WorkflowRepository {
     db: DatabaseConnection,
+    telemetry: Arc<TelemetryManager>,
 }
 
 impl WorkflowRepository {
-    pub fn new(db: DatabaseConnection) -> Self {
-        Self { db }
+    pub fn new(db: DatabaseConnection, telemetry: Arc<TelemetryManager>) -> Self {
+        Self { db, telemetry }
     }
 
+    /// db.client.operation.duration (Histogram) / db.client.response.returned_rows (Histogram)を記録する。
+    /// New RelicのDatabasesページはこのメトリクス（apm.service.datastore.operation.duration）から
+    /// 駆動されるため、スパンだけでは表示されない。
+    fn record_db_metrics(&self, operation: &str, table: &str, duration: std::time::Duration, rows: Option<u64>) {
+        let attributes = vec![
+            KeyValue::new("db.system", "postgresql"),
+            KeyValue::new("db.operation", operation.to_string()),
+            KeyValue::new("db.sql.table", table.to_string()),
+        ];
+        self.telemetry
+            .record_db_operation_duration(duration.as_secs_f64(), attributes.clone());
+        if let Some(rows) = rows {
+            self.telemetry.record_db_response_returned_rows(rows, attributes);
+        }
+    }
+
+    #[tracing::instrument(skip(self), fields(
+        otel.name = "SELECT workflow_instances",
+        otel.kind = "client",
+        db.system = "postgresql",
+        db.operation = "SELECT",
+        db.sql.table = "workflow_instances",
+    ))]
     pub async fn get_workflow_instance_by_application_id(
         &self,
         application_id: &str,
     ) -> Result<Option<WorkflowInstance>> {
+        let start = Instant::now();
         let instance = workflow_instance::Entity::find()
             .filter(workflow_instance::Column::ApplicationId.eq(application_id))
             .one(&self.db)
             .await?;
+        self.record_db_metrics(
+            "SELECT",
+            "workflow_instances",
+            start.elapsed(),
+            Some(if instance.is_some() { 1 } else { 0 }),
+        );
 
         Ok(instance.map(|m| m.into()))
     }
 
+    #[tracing::instrument(skip(self), fields(
+        otel.name = "INSERT workflow_instances",
+        otel.kind = "client",
+        db.system = "postgresql",
+        db.operation = "INSERT",
+        db.sql.table = "workflow_instances",
+    ))]
     pub async fn create_workflow_instance(
         &self,
         application_id: &str,
@@ -37,10 +78,12 @@ impl WorkflowRepository {
     ) -> Result<WorkflowInstance> {
         // 既存のインスタンスがある場合は削除（テスト用）
         if let Ok(Some(_)) = self.get_workflow_instance_by_application_id(application_id).await {
+            let delete_start = Instant::now();
             workflow_instance::Entity::delete_many()
                 .filter(workflow_instance::Column::ApplicationId.eq(application_id))
                 .exec(&self.db)
                 .await?;
+            self.record_db_metrics("DELETE", "workflow_instances", delete_start.elapsed(), None);
         }
 
         let now = chrono::Utc::now();
@@ -55,11 +98,20 @@ impl WorkflowRepository {
             updated_at: Set(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
         };
 
+        let start = Instant::now();
         let instance = active_model.insert(&self.db).await?;
+        self.record_db_metrics("INSERT", "workflow_instances", start.elapsed(), Some(1));
 
         Ok(instance.into())
     }
 
+    #[tracing::instrument(skip(self), fields(
+        otel.name = "UPDATE workflow_instances",
+        otel.kind = "client",
+        db.system = "postgresql",
+        db.operation = "UPDATE",
+        db.sql.table = "workflow_instances",
+    ))]
     pub async fn update_workflow_step(
         &self,
         application_id: &str,
@@ -77,32 +129,52 @@ impl WorkflowRepository {
         active_model.status = Set(status.to_string());
         active_model.updated_at = Set(sea_orm::prelude::DateTimeWithTimeZone::from(chrono::Utc::now()));
 
+        let start = Instant::now();
         active_model.update(&self.db).await?;
+        self.record_db_metrics("UPDATE", "workflow_instances", start.elapsed(), Some(1));
 
         Ok(())
     }
 
+    #[tracing::instrument(skip(self), fields(
+        otel.name = "SELECT workflow_steps",
+        otel.kind = "client",
+        db.system = "postgresql",
+        db.operation = "SELECT",
+        db.sql.table = "workflow_steps",
+    ))]
     pub async fn get_total_steps(
         &self,
         workflow_definition_id: Uuid,
     ) -> Result<i32> {
+        let start = Instant::now();
         let count = workflow_step::Entity::find()
             .filter(workflow_step::Column::WorkflowDefinitionId.eq(workflow_definition_id))
             .count(&self.db)
             .await?;
+        self.record_db_metrics("SELECT", "workflow_steps", start.elapsed(), Some(count));
 
         Ok(count as i32)
     }
 
+    #[tracing::instrument(skip(self), fields(
+        otel.name = "SELECT workflow_steps",
+        otel.kind = "client",
+        db.system = "postgresql",
+        db.operation = "SELECT",
+        db.sql.table = "workflow_steps",
+    ))]
     pub async fn get_workflow_steps(
         &self,
         workflow_definition_id: Uuid,
     ) -> Result<Vec<WorkflowStep>> {
+        let start = Instant::now();
         let steps = workflow_step::Entity::find()
             .filter(workflow_step::Column::WorkflowDefinitionId.eq(workflow_definition_id))
             .order_by_asc(workflow_step::Column::StepNumber)
             .all(&self.db)
             .await?;
+        self.record_db_metrics("SELECT", "workflow_steps", start.elapsed(), Some(steps.len() as u64));
 
         Ok(steps.into_iter().map(|s| s.into()).collect())
     }
@@ -112,23 +184,46 @@ impl WorkflowRepository {
         application_type: &str,
     ) -> Result<Option<Uuid>> {
         // 後方互換性のため、company_id=1をデフォルトとして使用
+        // （内部で呼ぶget_workflow_definition_by_application_type_and_company_idが計装されるため、
+        // ここに独自のスパンは不要）
         self.get_workflow_definition_by_application_type_and_company_id(application_type, 1).await
     }
 
+    #[tracing::instrument(skip(self), fields(
+        otel.name = "SELECT workflow_definitions",
+        otel.kind = "client",
+        db.system = "postgresql",
+        db.operation = "SELECT",
+        db.sql.table = "workflow_definitions",
+    ))]
     pub async fn get_workflow_definition_by_application_type_and_company_id(
         &self,
         application_type: &str,
         company_id: i32,
     ) -> Result<Option<Uuid>> {
+        let start = Instant::now();
         let definition = workflow_definition::Entity::find()
             .filter(workflow_definition::Column::ApplicationType.eq(application_type))
             .filter(workflow_definition::Column::CompanyId.eq(company_id))
             .one(&self.db)
             .await?;
+        self.record_db_metrics(
+            "SELECT",
+            "workflow_definitions",
+            start.elapsed(),
+            Some(if definition.is_some() { 1 } else { 0 }),
+        );
 
         Ok(definition.map(|d| d.id))
     }
 
+    #[tracing::instrument(skip(self, body), fields(
+        otel.name = "INSERT notifications",
+        otel.kind = "client",
+        db.system = "postgresql",
+        db.operation = "INSERT",
+        db.sql.table = "notifications",
+    ))]
     pub async fn create_notification(
         &self,
         notification_type: &str,
@@ -152,20 +247,36 @@ impl WorkflowRepository {
             created_at: Set(sea_orm::prelude::DateTimeWithTimeZone::from(now)),
         };
 
+        let start = Instant::now();
         let notification = active_model.insert(&self.db).await?;
+        self.record_db_metrics("INSERT", "notifications", start.elapsed(), Some(1));
 
         Ok(notification.id)
     }
 
+    #[tracing::instrument(skip(self), fields(
+        otel.name = "SELECT notifications",
+        otel.kind = "client",
+        db.system = "postgresql",
+        db.operation = "SELECT",
+        db.sql.table = "notifications",
+    ))]
     pub async fn get_notifications_by_recipient_id(
         &self,
         recipient_id: &str,
     ) -> Result<Vec<crate::domain::notification::Notification>> {
+        let start = Instant::now();
         let notifications = notification::Entity::find()
             .filter(notification::Column::RecipientId.eq(recipient_id))
             .order_by_desc(notification::Column::CreatedAt)
             .all(&self.db)
             .await?;
+        self.record_db_metrics(
+            "SELECT",
+            "notifications",
+            start.elapsed(),
+            Some(notifications.len() as u64),
+        );
 
         Ok(notifications.into_iter().map(|n| n.into()).collect())
     }
@@ -235,6 +346,3 @@ impl From<notification::Model> for crate::domain::notification::Notification {
         }
     }
 }
-
-
-

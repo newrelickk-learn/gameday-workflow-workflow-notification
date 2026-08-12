@@ -3,14 +3,30 @@ use actix_web::{
     Error,
 };
 use futures_util::future::LocalBoxFuture;
+use rust_tracing_otel::TelemetryManager;
 use std::future::{ready, Ready};
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, info_span, Instrument};
 
-/// OpenTelemetry Semantic Conventionsに準拠したHTTPリクエストスパンを作成するミドルウェア。
+/// OpenTelemetry Semantic Conventionsに準拠したHTTPリクエストスパン・メトリクスを
+/// 記録するミドルウェア。
 /// `tracing_actix_web::TracingLogger`はコンソールログ用のスパンしか作らないため、
 /// OTelエクスポート用にはこちらに置き換える（両方wrapすると二重計装になる）。
-pub struct TelemetryMiddleware;
+///
+/// スパンだけでなく`TelemetryManager`経由でメトリクス（http.server.request.duration等）
+/// も記録する。New RelicのAPM UI（Summary/Transactionsページ）はスパンではなく
+/// メトリクスを主なデータソースとして使うため、これが無いとAPMエンティティとして
+/// 正しく認識されない（domain: APMではなくdomain: EXTになる）。
+pub struct TelemetryMiddleware {
+    telemetry: Arc<TelemetryManager>,
+}
+
+impl TelemetryMiddleware {
+    pub fn new(telemetry: Arc<TelemetryManager>) -> Self {
+        Self { telemetry }
+    }
+}
 
 impl<S, B> Transform<S, ServiceRequest> for TelemetryMiddleware
 where
@@ -25,12 +41,16 @@ where
     type Future = Ready<Result<Self::Transform, Self::InitError>>;
 
     fn new_transform(&self, service: S) -> Self::Future {
-        ready(Ok(TelemetryMiddlewareService { service }))
+        ready(Ok(TelemetryMiddlewareService {
+            service,
+            telemetry: self.telemetry.clone(),
+        }))
     }
 }
 
 pub struct TelemetryMiddlewareService<S> {
     service: S,
+    telemetry: Arc<TelemetryManager>,
 }
 
 impl<S, B> Service<ServiceRequest> for TelemetryMiddlewareService<S>
@@ -89,12 +109,18 @@ where
             url.scheme = "http",
         );
 
+        let telemetry = self.telemetry.clone();
+        // http.server.active_requests (UpDownCounter): リクエスト開始で+1
+        // （TelemetryManagerに委譲メソッドが無いため、metrics_provider()経由で呼ぶ）
+        telemetry.metrics_provider().record_active_requests(&method, true);
+
         let fut = self.service.call(req);
 
         Box::pin(
             async move {
                 let res = fut.await?;
-                let status_code = res.status().as_u16() as i64;
+                let status_code_u16 = res.status().as_u16();
+                let status_code = status_code_u16 as i64;
                 let duration_ms = start.elapsed().as_millis() as f64;
 
                 let current_span = tracing::Span::current();
@@ -105,6 +131,14 @@ where
                 if status_code >= 500 {
                     current_span.record("otel.status_code", "ERROR");
                 }
+
+                // http.server.request.duration (Histogram) / http.server.requests (Counter)。
+                // New RelicのAPM UIはこのメトリクスから apm.service.transaction.duration 等の
+                // APM系メトリクスを合成する（スパンはサンプリングされるため補助的にしか使われない）。
+                // status_code >= 400 の場合、ライブラリ側が自動でerror.type属性を付与する。
+                telemetry.record_request_metrics(&route, &method, status_code_u16, duration_ms, None);
+                // http.server.active_requests (UpDownCounter): リクエスト終了で-1
+                telemetry.metrics_provider().record_active_requests(&method, false);
 
                 info!(
                     http.response.status_code = status_code,

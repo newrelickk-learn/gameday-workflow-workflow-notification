@@ -41,15 +41,15 @@ async fn main() -> std::io::Result<()> {
     tracing::info!("Connected to database");
 
     // リポジトリとサービスの作成
-    let notification_repository = WorkflowRepository::new(db.clone());
+    let notification_repository = WorkflowRepository::new(db.clone(), telemetry.clone());
     let notification_service_for_workflow = services::notification_service::NotificationServiceImpl::new(notification_repository);
     let notification_service_box: Box<dyn services::notification_service::NotificationService> = Box::new(notification_service_for_workflow);
-    
-    let workflow_repository = WorkflowRepository::new(db.clone());
+
+    let workflow_repository = WorkflowRepository::new(db.clone(), telemetry.clone());
     let workflow_service = WorkflowServiceImpl::new(workflow_repository, notification_service_box);
-    
+
     // 通知サービス用のリポジトリ（app_data用）
-    let notification_repository_for_app = WorkflowRepository::new(db);
+    let notification_repository_for_app = WorkflowRepository::new(db, telemetry.clone());
     let notification_service_for_app = services::notification_service::NotificationServiceImpl::new(notification_repository_for_app);
 
     let port = std::env::var("PORT")
@@ -63,11 +63,12 @@ async fn main() -> std::io::Result<()> {
     let workflow_service_data = web::Data::new(workflow_service);
     let notification_service_data = web::Data::new(notification_service_for_app);
 
+    let telemetry_for_server = telemetry.clone();
     let result = HttpServer::new(move || {
         App::new()
             .app_data(workflow_service_data.clone())
             .app_data(notification_service_data.clone())
-            .wrap(telemetry_middleware::TelemetryMiddleware)
+            .wrap(telemetry_middleware::TelemetryMiddleware::new(telemetry_for_server.clone()))
             .configure(routes::configure)
     })
     .bind(("0.0.0.0", port))?
