@@ -1,8 +1,10 @@
 use crate::domain::workflow::{WorkflowInstance, WorkflowStatus, WorkflowStep};
 use anyhow::Result;
-use rust_tracing_otel::{KeyValue, TelemetryManager};
+use opentelemetry::metrics::Histogram;
+use opentelemetry::KeyValue;
+use rust_tracing_otel::TelemetryManager;
 use sea_orm::{DatabaseConnection, EntityTrait, QueryFilter, ColumnTrait, Set, ActiveModelTrait, PaginatorTrait, QueryOrder};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -11,8 +13,37 @@ use super::workflow_definition;
 use super::workflow_instance;
 use super::workflow_step;
 
+// rust_tracing_otel::TelemetryManager::record_db_operation_duration/record_db_response_returned_rows は
+// 呼び出しごとに meter.f64_histogram(name).build() し直す実装になっており、DBメソッドのように
+// 短時間に連続して呼ばれるケースではHistogram Instrumentが再登録され、エクスポートされる値が
+// 常に空（count=0, buckets=0）になることを実機検証で確認した（HTTPメトリクスのように呼び出しが
+// 疎らな場合は問題が起きにくい）。そのためInstrumentをOnceLockでキャッシュし、直接recordする。
+static DB_OPERATION_DURATION: OnceLock<Histogram<f64>> = OnceLock::new();
+static DB_RETURNED_ROWS: OnceLock<Histogram<u64>> = OnceLock::new();
+
+fn db_operation_duration_histogram() -> &'static Histogram<f64> {
+    DB_OPERATION_DURATION.get_or_init(|| {
+        opentelemetry::global::meter("nrkk-rust-telemetry")
+            .f64_histogram("db.client.operation.duration")
+            .with_description("Duration of database client operations")
+            .with_unit("s")
+            .build()
+    })
+}
+
+fn db_returned_rows_histogram() -> &'static Histogram<u64> {
+    DB_RETURNED_ROWS.get_or_init(|| {
+        opentelemetry::global::meter("nrkk-rust-telemetry")
+            .u64_histogram("db.client.response.returned_rows")
+            .with_description("Number of rows returned by a database query")
+            .with_unit("{row}")
+            .build()
+    })
+}
+
 pub struct WorkflowRepository {
     db: DatabaseConnection,
+    #[allow(dead_code)]
     telemetry: Arc<TelemetryManager>,
 }
 
@@ -30,10 +61,9 @@ impl WorkflowRepository {
             KeyValue::new("db.operation", operation.to_string()),
             KeyValue::new("db.sql.table", table.to_string()),
         ];
-        self.telemetry
-            .record_db_operation_duration(duration.as_secs_f64(), attributes.clone());
+        db_operation_duration_histogram().record(duration.as_secs_f64(), &attributes);
         if let Some(rows) = rows {
-            self.telemetry.record_db_response_returned_rows(rows, attributes);
+            db_returned_rows_histogram().record(rows, &attributes);
         }
     }
 

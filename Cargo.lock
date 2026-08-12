@@ -4605,6 +4605,7 @@ dependencies = [
  "dotenv",
  "futures-util",
  "mockall",
+ "opentelemetry",
  "rdkafka",
  "rust-tracing-otel",
  "sea-orm",
