@@ -1,6 +1,7 @@
 use crate::domain::notification::{Notification, NotificationType};
 use crate::infrastructure::db::WorkflowRepository;
 use anyhow::Result;
+use tracing::Instrument;
 
 #[async_trait::async_trait]
 pub trait NotificationService: Send + Sync {
@@ -47,25 +48,38 @@ impl NotificationService for NotificationServiceImpl {
 
         let channel = "Email"; // デモ用: Emailとして記録
 
-        self.repository
-            .create_notification(
-                notification_type_str,
-                channel,
-                recipient_id,
-                None, // recipient_emailは省略
-                subject,
-                body,
-            )
-            .await?;
-
-        tracing::info!(
-            "Notification saved: type={:?}, recipient={}, subject={}",
-            notification_type,
-            recipient_id,
-            subject
+        // NotificationType/NotificationChannelはDisplayを実装していないため`?`(Debug)で記録する。
+        // recipient_idは&strでDisplayが使えるため`%`で記録する。
+        let span = tracing::info_span!(
+            "send_notification",
+            notification.r#type = ?notification_type,
+            notification.recipientId = %recipient_id,
+            notification.channel = %channel,
         );
 
-        Ok(())
+        async move {
+            self.repository
+                .create_notification(
+                    notification_type_str,
+                    channel,
+                    recipient_id,
+                    None, // recipient_emailは省略
+                    subject,
+                    body,
+                )
+                .await?;
+
+            tracing::info!(
+                "Notification saved: type={:?}, recipient={}, subject={}",
+                notification_type,
+                recipient_id,
+                subject
+            );
+
+            Ok(())
+        }
+        .instrument(span)
+        .await
     }
 
     async fn get_notification_history(

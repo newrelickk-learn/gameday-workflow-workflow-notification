@@ -3,6 +3,7 @@ use crate::domain::workflow::{ApprovalValidation, WorkflowInstance, WorkflowStat
 use crate::infrastructure::db::WorkflowRepository;
 use crate::services::notification_service::NotificationService;
 use anyhow::Result;
+use tracing::Instrument;
 
 // 経費精算（2段階承認）に切り上げる金額の閾値（円）。
 // 海外出張後の経費精算のような高額な経費（航空券・宿泊費など）はこの金額以上になる想定で、
@@ -114,39 +115,56 @@ impl WorkflowService for WorkflowServiceImpl {
         approver_id: &str,
         _status: &str,
     ) -> Result<ApprovalValidation> {
-        // TODO: 実際の実装
-        // 1. ワークフローインスタンスを取得
-        // 2. 現在のステップを確認
-        // 3. 承認者の権限を確認
-        // 4. 次のステップを判定
+        let span = tracing::info_span!(
+            "validate_approval",
+            workflow.approval_id = %approval_id,
+            workflow.application_id = %application_id,
+            workflow.approver_id = %approver_id,
+            workflow.current_step = tracing::field::Empty,
+            workflow.is_final_step = tracing::field::Empty,
+        );
 
-        // スタブ実装
-        let workflow_instance = self
-            .get_workflow_instance(application_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Workflow instance not found"))?;
+        async move {
+            // TODO: 実際の実装
+            // 1. ワークフローインスタンスを取得
+            // 2. 現在のステップを確認
+            // 3. 承認者の権限を確認
+            // 4. 次のステップを判定
 
-        let current_step = workflow_instance.current_step;
-        let total_steps = self
-            .repository
-            .get_total_steps(workflow_instance.workflow_definition_id)
-            .await
-            .unwrap_or(1);
-        let is_final_step = current_step >= total_steps;
-        let next_step = if is_final_step {
-            None
-        } else {
-            Some(current_step + 1)
-        };
+            // スタブ実装
+            let workflow_instance = self
+                .get_workflow_instance(application_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Workflow instance not found"))?;
 
-        Ok(ApprovalValidation {
-            approval_id: approval_id.to_string(),
-            application_id: application_id.to_string(),
-            approver_id: approver_id.to_string(),
-            current_step,
-            is_final_step,
-            next_step,
-        })
+            let current_step = workflow_instance.current_step;
+            let total_steps = self
+                .repository
+                .get_total_steps(workflow_instance.workflow_definition_id)
+                .await
+                .unwrap_or(1);
+            let is_final_step = current_step >= total_steps;
+            let next_step = if is_final_step {
+                None
+            } else {
+                Some(current_step + 1)
+            };
+
+            let current_span = tracing::Span::current();
+            current_span.record("workflow.current_step", current_step);
+            current_span.record("workflow.is_final_step", is_final_step);
+
+            Ok(ApprovalValidation {
+                approval_id: approval_id.to_string(),
+                application_id: application_id.to_string(),
+                approver_id: approver_id.to_string(),
+                current_step,
+                is_final_step,
+                next_step,
+            })
+        }
+        .instrument(span)
+        .await
     }
 
     async fn get_workflow_instance(
@@ -166,61 +184,76 @@ impl WorkflowService for WorkflowServiceImpl {
         applicant_id: Option<&str>,
         amount: Option<f64>,
     ) -> Result<(String, i32)> {
-        // CompanyIdが指定されていない場合は1をデフォルトとして使用
-        let company_id = company_id.unwrap_or(1);
+        let span = tracing::info_span!(
+            "start_workflow",
+            workflow.application_id = %application_id,
+            workflow.application_type = %application_type,
+            workflow.company_id = ?company_id,
+            workflow.resolved_application_type = tracing::field::Empty,
+            workflow.total_steps = tracing::field::Empty,
+        );
 
-        // 経費申請（Expense）は金額基準で、経費精算（ExpenseSettlement、2段階承認）の
-        // ワークフロー定義に切り上げるかどうかを判定する
-        let resolved_application_type = self.resolve_workflow_application_type(application_type, amount);
+        async move {
+            // CompanyIdが指定されていない場合は1をデフォルトとして使用
+            let company_id = company_id.unwrap_or(1);
 
-        // ワークフロー定義を取得（CompanyIdを考慮）
-        let workflow_definition_id = self
-            .repository
-            .get_workflow_definition_by_application_type_and_company_id(&resolved_application_type, company_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Workflow definition not found for application type: {} and company_id: {}", resolved_application_type, company_id))?;
+            // 経費申請（Expense）は金額基準で、経費精算（ExpenseSettlement、2段階承認）の
+            // ワークフロー定義に切り上げるかどうかを判定する
+            let resolved_application_type = self.resolve_workflow_application_type(application_type, amount);
+            tracing::Span::current().record("workflow.resolved_application_type", resolved_application_type.as_str());
 
-        // ワークフローインスタンスを作成
-        let instance = self
-            .repository
-            .create_workflow_instance(application_id, workflow_definition_id, 1)
-            .await?;
+            // ワークフロー定義を取得（CompanyIdを考慮）
+            let workflow_definition_id = self
+                .repository
+                .get_workflow_definition_by_application_type_and_company_id(&resolved_application_type, company_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Workflow definition not found for application type: {} and company_id: {}", resolved_application_type, company_id))?;
 
-        // 承認が必要なステップ（step 2以降）の承認者に通知を送信
-        let steps = self.repository.get_workflow_steps(workflow_definition_id).await?;
-        // step 1は申請者自身なので、step 2以降の承認者に通知を送信
-        for step in steps.iter() {
-            // step 1（エンジニア）は申請者自身なのでスキップ
-            if step.step_number == 1 {
-                continue;
-            }
+            // ワークフローインスタンスを作成
+            let instance = self
+                .repository
+                .create_workflow_instance(application_id, workflow_definition_id, 1)
+                .await?;
+
             // 承認が必要なステップ（step 2以降）の承認者に通知を送信
-            if let Some(approver_id) = self.get_approver_id_by_role_and_company(&step.approver_role, company_id) {
+            let steps = self.repository.get_workflow_steps(workflow_definition_id).await?;
+            // step 1は申請者自身なので、step 2以降の承認者に通知を送信
+            for step in steps.iter() {
+                // step 1（エンジニア）は申請者自身なのでスキップ
+                if step.step_number == 1 {
+                    continue;
+                }
+                // 承認が必要なステップ（step 2以降）の承認者に通知を送信
+                if let Some(approver_id) = self.get_approver_id_by_role_and_company(&step.approver_role, company_id) {
+                    let _ = self.notification_service.send_notification(
+                        NotificationType::ApprovalRequest,
+                        &approver_id,
+                        &format!("承認依頼: 申請ID {}", application_id),
+                        &format!("申請ID {} の承認をお願いします（ステップ {}: {}）", application_id, step.step_number, step.approver_role),
+                    ).await;
+                }
+            }
+
+            // 申請者に申請受付通知を送信（デモ用: applicant_idが提供された場合のみ）
+            if let Some(applicant) = applicant_id {
                 let _ = self.notification_service.send_notification(
                     NotificationType::ApprovalRequest,
-                    &approver_id,
-                    &format!("承認依頼: 申請ID {}", application_id),
-                    &format!("申請ID {} の承認をお願いします（ステップ {}: {}）", application_id, step.step_number, step.approver_role),
+                    applicant,
+                    &format!("申請を受け付けました: 申請ID {}", application_id),
+                    &format!("申請ID {} を受け付けました。承認プロセスが開始されました。", application_id),
                 ).await;
             }
+
+            // TODO: Kafkaイベントを発行
+
+            // total_stepsを取得
+            let total_steps = self.repository.get_total_steps(workflow_definition_id).await?;
+            tracing::Span::current().record("workflow.total_steps", total_steps);
+
+            Ok((instance.id.to_string(), total_steps))
         }
-
-        // 申請者に申請受付通知を送信（デモ用: applicant_idが提供された場合のみ）
-        if let Some(applicant) = applicant_id {
-            let _ = self.notification_service.send_notification(
-                NotificationType::ApprovalRequest,
-                applicant,
-                &format!("申請を受け付けました: 申請ID {}", application_id),
-                &format!("申請ID {} を受け付けました。承認プロセスが開始されました。", application_id),
-            ).await;
-        }
-
-        // TODO: Kafkaイベントを発行
-
-        // total_stepsを取得
-        let total_steps = self.repository.get_total_steps(workflow_definition_id).await?;
-
-        Ok((instance.id.to_string(), total_steps))
+        .instrument(span)
+        .await
     }
 
     async fn update_workflow_step(
@@ -237,57 +270,81 @@ impl WorkflowService for WorkflowServiceImpl {
             WorkflowStatus::Error => "error",
         };
 
-        let workflow_instance = self
-            .get_workflow_instance(application_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Workflow instance not found"))?;
+        let span = tracing::info_span!(
+            "update_workflow_step",
+            workflow.application_id = %application_id,
+            workflow.step = step,
+            workflow.status = %status_str,
+            workflow.is_completed = tracing::field::Empty,
+            workflow.notification_sent = tracing::field::Empty,
+        );
 
-        let total_steps = self
-            .repository
-            .get_total_steps(workflow_instance.workflow_definition_id)
-            .await?;
+        async move {
+            let workflow_instance = self
+                .get_workflow_instance(application_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Workflow instance not found"))?;
 
-        let is_final_step = step >= total_steps;
-        let is_completed = matches!(status, WorkflowStatus::Completed);
+            let total_steps = self
+                .repository
+                .get_total_steps(workflow_instance.workflow_definition_id)
+                .await?;
 
-        // ワークフローステップを更新
-        self.repository
-            .update_workflow_step(application_id, step, status_str)
-            .await?;
+            let is_final_step = step >= total_steps;
+            let is_completed = matches!(status, WorkflowStatus::Completed);
+            tracing::Span::current().record("workflow.is_completed", is_completed);
 
-        // 承認完了時、次のステップに進むか、最終承認完了の通知を送信
-        if is_completed {
-            if is_final_step {
-                // 最終承認完了: 申請者に通知
-                // デモ用: application_idから申請者IDを推測（実際の実装では、申請データから取得）
-                let applicant_id = application_id; // デモ用: application_idを申請者IDとして使用
-                let _ = self.notification_service.send_notification(
-                    NotificationType::WorkflowCompleted,
-                    applicant_id,
-                    &format!("承認が完了しました: 申請ID {}", application_id),
-                    &format!("申請ID {} のすべての承認が完了しました。", application_id),
-                ).await;
-            } else {
-                // 次のステップの承認者に通知
-                // TODO: ワークフローインスタンスからCompanyIdを取得する必要がある
-                // 現在はデフォルトで1を使用（後で改善が必要）
-                let company_id = 1; // TODO: ワークフローインスタンスから取得
-                let steps = self.repository.get_workflow_steps(workflow_instance.workflow_definition_id).await?;
-                let next_step_num = step + 1;
-                if let Some(next_step) = steps.iter().find(|s| s.step_number == next_step_num) {
-                    if let Some(approver_id) = self.get_approver_id_by_role_and_company(&next_step.approver_role, company_id) {
-                        let _ = self.notification_service.send_notification(
-                            NotificationType::ApprovalRequest,
-                            &approver_id,
-                            &format!("承認依頼: 申請ID {}", application_id),
-                            &format!("申請ID {} の承認をお願いします（ステップ {}: {}）", application_id, next_step.step_number, next_step.approver_role),
-                        ).await;
+            // ワークフローステップを更新
+            self.repository
+                .update_workflow_step(application_id, step, status_str)
+                .await?;
+
+            // notification.* 通知が実際に送信された（送信コードパスが実行された）かどうかを
+            // スパン属性として記録する。「is_completedがtrueでも次ステップの承認者が
+            // 解決できない等の理由で通知が送られない」という既存の挙動を、ビジネスロジックは
+            // 変更せずに観測可能にするためのフラグ。
+            let mut notification_sent = false;
+
+            // 承認完了時、次のステップに進むか、最終承認完了の通知を送信
+            if is_completed {
+                if is_final_step {
+                    // 最終承認完了: 申請者に通知
+                    // デモ用: application_idから申請者IDを推測（実際の実装では、申請データから取得）
+                    let applicant_id = application_id; // デモ用: application_idを申請者IDとして使用
+                    let _ = self.notification_service.send_notification(
+                        NotificationType::WorkflowCompleted,
+                        applicant_id,
+                        &format!("承認が完了しました: 申請ID {}", application_id),
+                        &format!("申請ID {} のすべての承認が完了しました。", application_id),
+                    ).await;
+                    notification_sent = true;
+                } else {
+                    // 次のステップの承認者に通知
+                    // TODO: ワークフローインスタンスからCompanyIdを取得する必要がある
+                    // 現在はデフォルトで1を使用（後で改善が必要）
+                    let company_id = 1; // TODO: ワークフローインスタンスから取得
+                    let steps = self.repository.get_workflow_steps(workflow_instance.workflow_definition_id).await?;
+                    let next_step_num = step + 1;
+                    if let Some(next_step) = steps.iter().find(|s| s.step_number == next_step_num) {
+                        if let Some(approver_id) = self.get_approver_id_by_role_and_company(&next_step.approver_role, company_id) {
+                            let _ = self.notification_service.send_notification(
+                                NotificationType::ApprovalRequest,
+                                &approver_id,
+                                &format!("承認依頼: 申請ID {}", application_id),
+                                &format!("申請ID {} の承認をお願いします（ステップ {}: {}）", application_id, next_step.step_number, next_step.approver_role),
+                            ).await;
+                            notification_sent = true;
+                        }
                     }
                 }
             }
-        }
 
-        Ok(())
+            tracing::Span::current().record("workflow.notification_sent", notification_sent);
+
+            Ok(())
+        }
+        .instrument(span)
+        .await
     }
     
     async fn get_workflow_definition(
