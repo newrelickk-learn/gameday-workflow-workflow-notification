@@ -23,7 +23,7 @@ WHERE application_type = 'Expense';
 -- 2. 経費精算（ExpenseSettlement）のワークフロー定義を追加（各会社ごと）
 --    エンジニア申請 → 上長承認 → 経理承認（3ステップ、承認は上長・経理の2段階）
 INSERT INTO workflow_definitions (application_type, company_id)
-SELECT 'ExpenseSettlement', generate_series(1, 50)
+SELECT 'ExpenseSettlement', generate_series(1::integer, 50::integer)
 ON CONFLICT (application_type, company_id) DO NOTHING;
 
 INSERT INTO workflow_steps (workflow_definition_id, step_number, approver_role, is_required)

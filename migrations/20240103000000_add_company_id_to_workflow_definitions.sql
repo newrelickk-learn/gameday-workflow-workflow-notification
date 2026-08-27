@@ -29,22 +29,22 @@ ON workflow_definitions(company_id);
 -- 6. 各会社（1-50）ごとにワークフロー定義を作成
 -- 出張申請（BusinessTrip）
 INSERT INTO workflow_definitions (application_type, company_id)
-SELECT 'BusinessTrip', generate_series(1, 50)
+SELECT 'BusinessTrip', generate_series(1::integer, 50::integer)
 ON CONFLICT (application_type, company_id) DO NOTHING;
 
 -- 経費申請（Expense）
 INSERT INTO workflow_definitions (application_type, company_id)
-SELECT 'Expense', generate_series(1, 50)
+SELECT 'Expense', generate_series(1::integer, 50::integer)
 ON CONFLICT (application_type, company_id) DO NOTHING;
 
 -- 休暇申請（Vacation）
 INSERT INTO workflow_definitions (application_type, company_id)
-SELECT 'Vacation', generate_series(1, 50)
+SELECT 'Vacation', generate_series(1::integer, 50::integer)
 ON CONFLICT (application_type, company_id) DO NOTHING;
 
 -- プロモーション申請（Promotion）
 INSERT INTO workflow_definitions (application_type, company_id)
-SELECT 'Promotion', generate_series(1, 50)
+SELECT 'Promotion', generate_series(1::integer, 50::integer)
 ON CONFLICT (application_type, company_id) DO NOTHING;
 
 -- 7. 各会社ごとにワークフローステップを作成
