@@ -1,4 +1,3 @@
--- ワークフロー定義テーブル
 CREATE TABLE IF NOT EXISTS workflow_definitions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     application_type VARCHAR(50) NOT NULL,
@@ -7,7 +6,6 @@ CREATE TABLE IF NOT EXISTS workflow_definitions (
     UNIQUE(application_type)
 );
 
--- ワークフローステップテーブル（正規化）
 CREATE TABLE IF NOT EXISTS workflow_steps (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workflow_definition_id UUID NOT NULL REFERENCES workflow_definitions(id) ON DELETE CASCADE,
@@ -19,7 +17,6 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     UNIQUE(workflow_definition_id, step_number)
 );
 
--- ワークフローインスタンステーブル
 CREATE TABLE IF NOT EXISTS workflow_instances (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     application_id VARCHAR(255) NOT NULL,
@@ -31,7 +28,6 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     UNIQUE(application_id)
 );
 
--- 通知テーブル
 CREATE TABLE IF NOT EXISTS notifications (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     notification_type VARCHAR(50) NOT NULL,
@@ -44,7 +40,6 @@ CREATE TABLE IF NOT EXISTS notifications (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
--- 通知設定テーブル
 CREATE TABLE IF NOT EXISTS notification_settings (
     user_id VARCHAR(255) PRIMARY KEY,
     email_enabled BOOLEAN NOT NULL DEFAULT true,
@@ -54,7 +49,6 @@ CREATE TABLE IF NOT EXISTS notification_settings (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
--- インデックス
 CREATE INDEX IF NOT EXISTS idx_workflow_instances_application_id ON workflow_instances(application_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_instances_status ON workflow_instances(status);
 CREATE INDEX IF NOT EXISTS idx_workflow_steps_definition_id ON workflow_steps(workflow_definition_id);
@@ -62,13 +56,10 @@ CREATE INDEX IF NOT EXISTS idx_workflow_steps_step_number ON workflow_steps(work
 CREATE INDEX IF NOT EXISTS idx_notifications_recipient_id ON notifications(recipient_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at);
 
--- サンプルデータ（開発・テスト用）
--- 1. 出張申請のワークフロー定義（エンジニア申請 → 上長承認 → 本部長最終承認）
 INSERT INTO workflow_definitions (application_type) VALUES
 ('BusinessTrip')
 ON CONFLICT (application_type) DO NOTHING;
 
--- 出張申請のワークフローステップ
 INSERT INTO workflow_steps (workflow_definition_id, step_number, approver_role, is_required)
 SELECT id, 1, 'エンジニア', true FROM workflow_definitions WHERE application_type = 'BusinessTrip'
 ON CONFLICT (workflow_definition_id, step_number) DO NOTHING;
@@ -81,12 +72,10 @@ INSERT INTO workflow_steps (workflow_definition_id, step_number, approver_role, 
 SELECT id, 3, '本部長', true FROM workflow_definitions WHERE application_type = 'BusinessTrip'
 ON CONFLICT (workflow_definition_id, step_number) DO NOTHING;
 
--- 2. 経費申請のワークフロー定義（エンジニア申請 → 上長承認 → 経理承認）
 INSERT INTO workflow_definitions (application_type) VALUES
 ('Expense')
 ON CONFLICT (application_type) DO NOTHING;
 
--- 経費申請のワークフローステップ
 INSERT INTO workflow_steps (workflow_definition_id, step_number, approver_role, is_required)
 SELECT id, 1, 'エンジニア', true FROM workflow_definitions WHERE application_type = 'Expense'
 ON CONFLICT (workflow_definition_id, step_number) DO NOTHING;
@@ -99,12 +88,10 @@ INSERT INTO workflow_steps (workflow_definition_id, step_number, approver_role, 
 SELECT id, 3, '経理', true FROM workflow_definitions WHERE application_type = 'Expense'
 ON CONFLICT (workflow_definition_id, step_number) DO NOTHING;
 
--- 3. 休暇申請のワークフロー定義（エンジニア申請 → 上長承認）
 INSERT INTO workflow_definitions (application_type) VALUES
 ('Vacation')
 ON CONFLICT (application_type) DO NOTHING;
 
--- 休暇申請のワークフローステップ
 INSERT INTO workflow_steps (workflow_definition_id, step_number, approver_role, is_required)
 SELECT id, 1, 'エンジニア', true FROM workflow_definitions WHERE application_type = 'Vacation'
 ON CONFLICT (workflow_definition_id, step_number) DO NOTHING;
@@ -113,12 +100,10 @@ INSERT INTO workflow_steps (workflow_definition_id, step_number, approver_role, 
 SELECT id, 2, '上長', true FROM workflow_definitions WHERE application_type = 'Vacation'
 ON CONFLICT (workflow_definition_id, step_number) DO NOTHING;
 
--- 4. プロモーション申請のワークフロー定義（上長申請 → 本部長承認）
 INSERT INTO workflow_definitions (application_type) VALUES
 ('Promotion')
 ON CONFLICT (application_type) DO NOTHING;
 
--- プロモーション申請のワークフローステップ
 INSERT INTO workflow_steps (workflow_definition_id, step_number, approver_role, is_required)
 SELECT id, 1, '上長', true FROM workflow_definitions WHERE application_type = 'Promotion'
 ON CONFLICT (workflow_definition_id, step_number) DO NOTHING;
