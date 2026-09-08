@@ -3,11 +3,28 @@ use actix_web::{
     Error,
 };
 use futures_util::future::LocalBoxFuture;
+use opentelemetry::propagation::{Extractor, TextMapPropagator};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use rust_tracing_otel::TelemetryManager;
 use std::future::{ready, Ready};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, info_span, Instrument};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+/// actix-webのHeaderMapからW3C Trace Context (`traceparent`/`tracestate`)を
+/// 読み取るためのExtractor実装。
+struct HeaderExtractor<'a>(&'a actix_web::http::header::HeaderMap);
+
+impl<'a> Extractor for HeaderExtractor<'a> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|v| v.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|k| k.as_str()).collect()
+    }
+}
 
 /// OpenTelemetry Semantic Conventionsに準拠したHTTPリクエストスパン・メトリクスを
 /// 記録するミドルウェア。
@@ -108,6 +125,13 @@ where
             url.path = %path,
             url.scheme = "http",
         );
+
+        // 呼び出し元サービスが送ってきたtraceparentヘッダを抽出し、
+        // このスパンを親スパンの子として接続する（Distributed Tracing）。
+        // これを行わないと、このサービスのスパンが独立した新規トレースとして
+        // 扱われ、呼び出し元とのトレースが分断される。
+        let parent_cx = TraceContextPropagator::new().extract(&HeaderExtractor(req.headers()));
+        let _ = span.set_parent(parent_cx);
 
         let telemetry = self.telemetry.clone();
         // http.server.active_requests (UpDownCounter): リクエスト開始で+1

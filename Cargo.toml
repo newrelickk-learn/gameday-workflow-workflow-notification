@@ -23,6 +23,8 @@ dotenv = "0.15"
 rust-tracing-otel = { git = "https://github.com/Azumaxoid/rust-tracing-otel" }
 futures-util = "0.3"
 opentelemetry = "0.31"
+opentelemetry_sdk = "0.31"
+tracing-opentelemetry = "0.32"
 
 [dev-dependencies]
 mockall = "0.12"

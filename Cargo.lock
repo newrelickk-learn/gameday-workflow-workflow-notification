@@ -4606,6 +4606,7 @@ dependencies = [
  "futures-util",
  "mockall",
  "opentelemetry",
+ "opentelemetry_sdk",
  "rdkafka",
  "rust-tracing-otel",
  "sea-orm",
@@ -4615,6 +4616,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
 ]
