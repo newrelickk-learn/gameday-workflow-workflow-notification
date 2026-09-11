@@ -209,6 +209,8 @@ impl WorkflowRepository {
         Ok(steps.into_iter().map(|s| s.into()).collect())
     }
 
+    // 後方互換のために残しているAPIで、現在は呼び出し元がないためdead_codeを許可する。
+    #[allow(dead_code)]
     pub async fn get_workflow_definition_by_application_type(
         &self,
         application_type: &str,
@@ -371,7 +373,7 @@ impl From<notification::Model> for crate::domain::notification::Notification {
             recipient_email: model.recipient_email,
             subject: model.subject,
             body: model.body,
-            sent_at: model.sent_at.map(|dt| chrono::DateTime::<chrono::Utc>::from(dt)),
+            sent_at: model.sent_at.map(chrono::DateTime::<chrono::Utc>::from),
             created_at: chrono::DateTime::<chrono::Utc>::from(model.created_at),
         }
     }

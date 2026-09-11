@@ -11,6 +11,9 @@ pub enum WorkflowStatus {
     Error,
 }
 
+// ワークフロー定義のドメインモデル。DBのworkflow_definitionsに対応する型として
+// 定義してあるが、現在のコードパスでは組み立てていないためdead_codeを許可する。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ApplicationType {
     BusinessTrip,
@@ -21,6 +24,7 @@ pub enum ApplicationType {
     Promotion,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowDefinition {
     pub id: Uuid,

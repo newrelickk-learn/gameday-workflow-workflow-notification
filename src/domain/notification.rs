@@ -29,6 +29,8 @@ pub struct Notification {
     pub created_at: DateTime<Utc>,
 }
 
+// DBのnotification_settingsに対応するドメインモデル。まだ参照していないため許可する。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationSettings {
     pub user_id: String,
